@@ -17,4 +17,68 @@
        but LocalFileSystem moves the offending file and its checksum to a side directory on the same device called bad_files. 
        Administrators should periodically check for these bad files and take action on them.
        
-2.        
+2. Anatomy of File Write to HDFS :-
+                      We are going to consider case of creating a new file,writing data to it,then closing the file.The client creates
+       file by calling create() on DistributedFileSystem.
+       DistributedFileSystem while File Write :
+               i) DistributedFileSystem makes an RPC call to the namenode to create a new file in the filesystem namespace, with no
+            blocks associated with it The namenode performs some checks if checks pass, the namenode makes a record of the new file.
+              ii) The DistributedFileSystem returns an FSDataOutputStream for client to start writing data to.Just as in the read case.
+             iii) FSDataOutputStream wraps a DFSOutputStream, which handles communication with the datanodes and namenode.
+                  class DFSOutputStream extends FSOutputSummer implements Syncable
+                               {
+                                      private final LinkedList<Packet> dataQueue = new LinkedList<Packet>();
+                                      private final LinkedList<Packet> ackQueue = new LinkedList<Packet>();
+                                      private DataStreamer streamer;
+                                }
+                      The dataQueue is consumed by the DataStreamer, which is responsible for asking the namenode to allocate new blocks
+       by picking a list of suitable datanodes to store the replicas. The DataStreamer streams the packets to the first datanode in the
+       pipeline, which stores each packet and forwards it to the second datanode in the pipeline.
+
+         Role of DFSOutputStream in File Write
+               i) DFSOutputStream, handles communication with the datanodes and namenode.
+              ii) As the client writes data (step 3), the DFSOutputStream splits it into packets, which it writes to an internal queue
+           called the data queue.
+             iii) The DFSOutputStream also maintains an internal queue of packets that are waiting to be acknowledged by datanodes, 
+           called the ack queue . A packet is removed from the ack queue only when it has been acknowledged by all the datanodes in the 
+           pipeline.
+                       Just as in the read case, FSDataOutputStream wraps a DFSOutputStream, which handles communication with the 
+        datanodes and namenode. DFSOutputStream creates files from a stream of bytes. The client application writes data that is cached 
+        internally by this stream. Data is broken up into packets, each packet is typically 64K in size (Fig below). A packet comprises 
+        of chunks. Each chunk is typically 512 bytes and has an associated checksum with it. When a client application fills up the 
+        currentPacket, it is added  into dataQueue. The DataStreamer thread picks up packets from the dataQueue, sends it to the first
+        datanode in the pipeline and moves it from the dataQueue to the ackQueue. The ResponseProcessor receives acks from the datanodes.
+        When an successful ack for a packet is received from all datanodes, the ResponseProcessor removes the corresponding packet from 
+        the ackQueue. In case of error, all outstanding packets and moved from ackQueue. A new pipeline is setup by eliminating the bad 
+        datanode from the original pipeline. The DataStreamer now starts sending packets from the dataQueue.
+        
+                       As the client writes data  the DFSOutputStream splits it into packets,(above)  which it writes to an internal 
+        queue called the data queue. The DFSOutputStream also maintains an internal queue of packets that are waiting to be acknowledged
+        by datanodes, called the ack queue. A packet is removed from the ackqueue only when it has been acknowledged by all the datanodes
+        in the pipeline.
+                       The data queue is consumed by the DataStreamer, which is responsible for asking the namenode to allocate new 
+        blocks by picking a list of suitable datanodes to store the replicas . The DataStreamer streams the packets to the first 
+        datanode in the pipeline,which stores each packet and forwards it to the second datanode in the pipeline.
+                       If any datanode fails while data is being written to it, then the following actions are taken,which are
+        transparent to the client writing the data.
+                                 1. First, the pipeline is closed.
+                                 2. Any packets in the ack queue are added to the front of the data queue so that datanodes that are 
+        downstream from the failed node will not miss any packets . basically whatever we write on the datanode the same is written in
+        ack queue  and its not deleted till the ResponseProcessor receives acks from the datanode. Now if the data node is failed then 
+        the ack queue is data is added to data queue.
+                                 3. The failed datanode is removed from the pipeline, and a new pipeline is constructed from the two
+        good datanodes. The remainder of the block s data is written to the good datanodes in the pipeline.
+
+ 3.                         During file writing,what happens when one of the machines i.e. part of the pipeline which has datanode
+        process running fails? Hadoop has inbuilt functionality to handle this scenario (hdfs is fault tolerant). If a datanode fails
+        while data is being written to it, then the following actions are taken, which are transparent to the client writing the data :
+                   i) First, the pipeline is closed, and any packets in the ack queue are added to the front of the data queue so that 
+        datanode that are downstream from the failed node will not miss any packets.
+                  ii) The current block on the good datanode is given a new identity, which is communicated to the namenode, so that the
+        partial block on the failed datanode will be deleted if the failed datanode recovers later on.
+                 iii) The failed datanode is removed from the pipeline, and the remainder of the block’s data is written to the two good 
+        datanodes in the pipeline.
+                 iv)  The namenode notices that the block is under-replicated, and it arranges for a further replica to be created on 
+        another node. Subsequent blocks are then treated as normal.
+        
+        
